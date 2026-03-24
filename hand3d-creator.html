@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIR3D</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ─── RESET & BASE ─────────────────────────────────── */
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100vw; height:100vh; overflow:hidden; background:#000; font-family:'Inter',sans-serif; color:#fff; }
+
+/* ─── LAYER STACK ──────────────────────────────────────
+   z1   camera video  (full-screen background)
+   z2   Three.js canvas (transparent — 3D on top of camera)
+   z3   hand skeleton canvas (CSS-mirrored, matches video)
+   z10  UI panels
+   z20  cursors, toasts, dwell rings
+*/
+
+#video {
+  position:fixed; inset:0; width:100%; height:100%;
+  object-fit:cover; transform:scaleX(-1); z-index:1;
+  filter:brightness(0.38) saturate(1.1);
+}
+#three {
+  position:fixed; inset:0; z-index:2; pointer-events:all;
+}
+#hcanvas {
+  position:fixed; inset:0; z-index:3; pointer-events:none;
+  transform:scaleX(-1); transform-origin:center;
+}
+
+/* ─── HAND CURSORS ─────────────────────────────────── */
+.hand-cursor {
+  position:fixed; pointer-events:none; z-index:20;
+  transform:translate(-50%,-50%); display:none;
+}
+.hand-cursor .ring {
+  width:22px; height:22px; border-radius:50%;
+  border:2px solid rgba(255,255,255,0.75);
+  position:relative; transition:all 0.07s;
+}
+.hand-cursor .ring::before,.hand-cursor .ring::after {
+  content:''; position:absolute; background:rgba(255,255,255,0.6);
+}
+.hand-cursor .ring::before { top:50%; left:-4px; right:-4px; height:1px; transform:translateY(-50%); }
+.hand-cursor .ring::after  { left:50%; top:-4px; bottom:-4px; width:1px; transform:translateX(-50%); }
+/* Left hand = blue tint */
+#cursor-l .ring { border-color:rgba(96,165,250,0.9); }
+#cursor-l .ring::before,#cursor-l .ring::after { background:rgba(96,165,250,0.7); }
+/* Right hand = pink tint */
+#cursor-r .ring { border-color:rgba(244,114,182,0.9); }
+#cursor-r .ring::before,#cursor-r .ring::after { background:rgba(244,114,182,0.7); }
+/* Gesture states */
+.hand-cursor.pinch .ring { width:14px; height:14px; border-width:2px; opacity:0.9; }
+.hand-cursor.grab  .ring { width:32px; height:32px; opacity:0.85; }
+.hand-cursor.open  .ring { width:28px; height:28px; opacity:0.7; }
+.hand-cursor.point .ring { width:10px; height:10px; border-width:3px; }
+
+/* ─── DWELL RING ───────────────────────────────────── */
+.dwell-ring {
+  position:fixed; z-index:25; pointer-events:none;
+  width:36px; height:36px;
+  transform:translate(-50%,-50%);
+}
+.dwell-ring::before {
+  content:'';
+  position:absolute; inset:0; border-radius:50%;
+  background:conic-gradient(rgba(255,255,255,0.8) calc(var(--pct,0)*360deg), transparent 0);
+  mask:radial-gradient(farthest-side, transparent 60%, black 61%);
+  -webkit-mask:radial-gradient(farthest-side, transparent 60%, black 61%);
+}
+
+/* Dwell hover state on any target */
+.dwell-hover {
+  outline:1.5px solid rgba(255,255,255,0.4) !important;
+  outline-offset:2px;
+}
+.dwell-fired {
+  background:rgba(255,255,255,0.15) !important;
+  transition:background 0.1s;
+}
+
+/* ─── TOP BAR ──────────────────────────────────────── */
+#topbar {
+  position:fixed; top:0; left:0; right:0; height:50px;
+  z-index:10; display:flex; align-items:center;
+  padding:0 18px; gap:10px;
+  background:rgba(0,0,0,0.62); backdrop-filter:blur(22px);
+  border-bottom:1px solid rgba(255,255,255,0.06);
+}
+.logo {
+  font-family:'JetBrains Mono',monospace; font-size:14px;
+  font-weight:500; letter-spacing:3px; color:#fff;
+  margin-right:6px; user-select:none;
+}
+.bar-sep { width:1px; height:18px; background:rgba(255,255,255,0.1); flex-shrink:0; }
+.tab {
+  padding:5px 13px; border-radius:6px; font-size:11px;
+  font-weight:500; cursor:pointer; border:none;
+  background:transparent; color:rgba(255,255,255,0.38);
+  transition:all 0.14s; letter-spacing:0.3px;
+}
+.tab:hover { color:rgba(255,255,255,0.75); }
+.tab.active { background:rgba(255,255,255,0.1); color:#fff; }
+.spacer { flex:1; }
+.ibtn {
+  width:32px; height:32px; border-radius:7px;
+  border:1px solid rgba(255,255,255,0.1);
+  background:rgba(255,255,255,0.04);
+  color:rgba(255,255,255,0.45); font-size:13px;
+  cursor:pointer; display:flex; align-items:center; justify-content:center;
+  transition:all 0.14s; flex-shrink:0;
+}
+.ibtn:hover { border-color:rgba(255,255,255,0.22); color:#fff; background:rgba(255,255,255,0.08); }
+.ibtn.on    { border-color:#4ade80; color:#4ade80; background:rgba(74,222,128,0.09); }
+
+/* ─── SIDEBAR (LEFT) ───────────────────────────────── */
+#sidebar {
+  position:fixed; left:14px; top:62px; bottom:46px;
+  width:196px; z-index:10;
+  display:flex; flex-direction:column; gap:8px;
+  overflow-y:auto; scrollbar-width:none;
+}
+#sidebar::-webkit-scrollbar { display:none; }
+
+.panel {
+  background:rgba(0,0,0,0.58); backdrop-filter:blur(22px);
+  border:1px solid rgba(255,255,255,0.07); border-radius:11px; padding:13px;
+}
+.plabel {
+  font-size:9px; font-weight:500; color:rgba(255,255,255,0.28);
+  letter-spacing:1.8px; text-transform:uppercase; margin-bottom:9px;
+}
+
+/* Shape grid */
+.shapes { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; }
+.shape {
+  aspect-ratio:1; border-radius:7px;
+  border:1px solid rgba(255,255,255,0.07);
+  background:rgba(255,255,255,0.02);
+  cursor:pointer; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:3px;
+  color:rgba(255,255,255,0.38); font-size:9px; letter-spacing:0.4px;
+  transition:all 0.13s;
+}
+.shape svg { width:20px; height:20px; }
+.shape:hover { border-color:rgba(255,255,255,0.2); color:rgba(255,255,255,0.8); background:rgba(255,255,255,0.05); }
+.shape.on    { border-color:rgba(255,255,255,0.45); color:#fff; background:rgba(255,255,255,0.09); }
+
+/* Colors */
+.colors { display:flex; gap:5px; flex-wrap:wrap; }
+.color {
+  width:19px; height:19px; border-radius:50%;
+  cursor:pointer; border:2px solid transparent; transition:all 0.13s;
+}
+.color:hover { transform:scale(1.14); }
+.color.on    { border-color:#fff; transform:scale(1.22); box-shadow:0 0 6px rgba(255,255,255,0.3); }
+
+/* Slider */
+.sl-row { display:flex; justify-content:space-between; font-size:10px;
+  color:rgba(255,255,255,0.35); margin-bottom:5px; }
+.sl-row span:last-child { color:rgba(255,255,255,0.75); font-family:'JetBrains Mono',monospace; font-size:9px; }
+input[type=range] {
+  width:100%; -webkit-appearance:none; height:2px;
+  background:rgba(255,255,255,0.12); border-radius:1px; outline:none; cursor:pointer;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance:none; width:11px; height:11px; border-radius:50%;
+  background:#fff; cursor:pointer; box-shadow:0 0 0 2px rgba(255,255,255,0.12);
+}
+
+/* Action buttons */
+.action {
+  width:100%; padding:7px 10px; border-radius:7px;
+  border:1px solid rgba(255,255,255,0.07); background:rgba(255,255,255,0.02);
+  color:rgba(255,255,255,0.55); font-size:11px; cursor:pointer;
+  text-align:left; display:flex; align-items:center; gap:7px;
+  transition:all 0.13s; margin-bottom:3px;
+}
+.action:hover            { background:rgba(255,255,255,0.07); color:#fff; border-color:rgba(255,255,255,0.16); }
+.action.del:hover        { background:rgba(239,68,68,0.09); border-color:rgba(239,68,68,0.3); color:#f87171; }
+.action.save:hover       { background:rgba(74,222,128,0.09); border-color:rgba(74,222,128,0.3); color:#4ade80; }
+
+/* Transform mode buttons */
+.tmbtn {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:30px; height:24px; border-radius:5px; font-size:10px; font-weight:600;
+  border:1px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.03);
+  color:rgba(255,255,255,0.4); cursor:pointer; transition:all 0.13s;
+  font-family:'JetBrains Mono',monospace;
+}
+.tmbtn.on    { background:rgba(255,255,255,0.1); border-color:rgba(255,255,255,0.3); color:#fff; }
+.tmbtn:hover:not(.on) { border-color:rgba(255,255,255,0.2); color:rgba(255,255,255,0.7); }
+.tm-row { display:flex; gap:4px; }
+
+/* ─── RIGHT PANEL ──────────────────────────────────── */
+#rpanel {
+  position:fixed; right:14px; top:62px;
+  width:186px; z-index:10;
+  display:flex; flex-direction:column; gap:8px;
+}
+.scene-item {
+  display:flex; align-items:center; gap:7px;
+  padding:6px 9px; border-radius:6px; cursor:pointer;
+  font-size:11px; color:rgba(255,255,255,0.42); transition:all 0.11s;
+}
+.scene-item:hover { background:rgba(255,255,255,0.05); color:rgba(255,255,255,0.8); }
+.scene-item.on    { background:rgba(255,255,255,0.08); color:#fff; }
+.scene-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+.scene-del { margin-left:auto; opacity:0; color:rgba(239,68,68,0.7); font-size:12px; transition:opacity 0.1s; }
+.scene-item:hover .scene-del { opacity:1; }
+
+/* Transform cells */
+.tf-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:3px; margin-top:5px; }
+.tf-cell { background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.05);
+  border-radius:5px; padding:4px 3px; text-align:center; }
+.tf-label { font-size:7px; color:rgba(255,255,255,0.28); letter-spacing:1px; margin-bottom:1px; }
+.tf-val   { font-size:9px; color:#fff; font-family:'JetBrains Mono',monospace; }
+
+/* ─── BOTTOM STATUS BAR ────────────────────────────── */
+#statusbar {
+  position:fixed; bottom:0; left:0; right:0; height:38px; z-index:10;
+  display:flex; align-items:center; padding:0 18px; gap:16px;
+  background:rgba(0,0,0,0.62); backdrop-filter:blur(22px);
+  border-top:1px solid rgba(255,255,255,0.06);
+}
+.stat {
+  font-size:10px; color:rgba(255,255,255,0.28);
+  font-family:'JetBrains Mono',monospace; display:flex; gap:5px; align-items:center;
+}
+.stat b { color:rgba(255,255,255,0.7); font-weight:400; }
+
+/* Gesture pills */
+.gp {
+  display:flex; align-items:center; gap:5px;
+  padding:2px 9px 2px 6px; border-radius:14px;
+  background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08);
+  font-size:10px; color:rgba(255,255,255,0.35); transition:all 0.18s; white-space:nowrap;
+}
+.gp .dot { width:5px; height:5px; border-radius:50%; background:rgba(255,255,255,0.18); transition:all 0.18s; }
+.gp.active { background:rgba(74,222,128,0.1); border-color:rgba(74,222,128,0.3); color:#4ade80; }
+.gp.active .dot { background:#4ade80; box-shadow:0 0 5px #4ade80; }
+.gp.blue.active  { background:rgba(96,165,250,0.1); border-color:rgba(96,165,250,0.3); color:#60a5fa; }
+.gp.blue.active .dot { background:#60a5fa; box-shadow:0 0 5px #60a5fa; }
+.gp.pink.active  { background:rgba(244,114,182,0.1); border-color:rgba(244,114,182,0.3); color:#f472b6; }
+.gp.pink.active .dot { background:#f472b6; box-shadow:0 0 5px #f472b6; }
+
+/* ─── GESTURE GUIDE (collapsible, right of statusbar) ─ */
+#gest-guide {
+  position:fixed; right:14px; bottom:46px; z-index:10;
+  width:186px;
+}
+.gg-toggle {
+  width:100%; padding:6px 10px; background:rgba(0,0,0,0.6);
+  backdrop-filter:blur(20px); border:1px solid rgba(255,255,255,0.07);
+  border-radius:8px; color:rgba(255,255,255,0.4); font-size:10px;
+  cursor:pointer; text-align:left; display:flex; justify-content:space-between;
+  align-items:center; transition:all 0.13s;
+}
+.gg-toggle:hover { color:#fff; border-color:rgba(255,255,255,0.18); }
+#gg-body {
+  display:none; margin-top:4px; padding:10px 12px;
+  background:rgba(0,0,0,0.7); backdrop-filter:blur(22px);
+  border:1px solid rgba(255,255,255,0.07); border-radius:8px;
+}
+#gg-body.open { display:block; }
+.gg-row { display:flex; gap:8px; align-items:flex-start; margin-bottom:7px; font-size:10px; }
+.gg-em { font-size:14px; flex-shrink:0; margin-top:1px; }
+.gg-txt { color:rgba(255,255,255,0.45); line-height:1.4; }
+.gg-txt strong { color:rgba(255,255,255,0.75); font-weight:500; display:block; }
+
+/* ─── TOAST ────────────────────────────────────────── */
+#toasts {
+  position:fixed; top:60px; left:50%; transform:translateX(-50%);
+  z-index:20; display:flex; flex-direction:column; gap:5px;
+  align-items:center; pointer-events:none;
+}
+.toast {
+  padding:6px 14px; border-radius:7px; font-size:11px; backdrop-filter:blur(18px);
+  animation:tin 0.18s ease, tout 0.22s 2.3s forwards;
+}
+.toast.s { background:rgba(74,222,128,0.18); border:1px solid rgba(74,222,128,0.28); color:#4ade80; }
+.toast.i { background:rgba(255,255,255,0.09); border:1px solid rgba(255,255,255,0.14); color:#fff; }
+.toast.w { background:rgba(251,146,60,0.18); border:1px solid rgba(251,146,60,0.28); color:#fb923c; }
+.toast.e { background:rgba(239,68,68,0.18); border:1px solid rgba(239,68,68,0.28); color:#f87171; }
+@keyframes tin  { from{opacity:0;transform:translateY(-5px)} to{opacity:1;transform:none} }
+@keyframes tout { to{opacity:0;transform:translateY(-4px)} }
+
+/* ─── WELCOME SCREEN ───────────────────────────────── */
+#welcome {
+  position:fixed; inset:0; z-index:100;
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(0,0,0,0.9); backdrop-filter:blur(20px);
+  transition:opacity 0.38s;
+}
+#welcome.hide { opacity:0; pointer-events:none; }
+.wcard {
+  width:min(560px,92vw); background:rgba(255,255,255,0.04);
+  border:1px solid rgba(255,255,255,0.1); border-radius:16px; padding:34px;
+}
+.wtitle {
+  font-family:'JetBrains Mono',monospace; font-size:26px;
+  font-weight:500; letter-spacing:4px; margin-bottom:4px;
+}
+.wsub  { font-size:11px; color:rgba(255,255,255,0.3); letter-spacing:1px; margin-bottom:26px; }
+.wgrid { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-bottom:22px; }
+.wi    { padding:11px; border-radius:9px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); display:flex; gap:9px; }
+.we    { font-size:17px; flex-shrink:0; margin-top:1px; }
+.wt    { font-size:11px; }
+.wt strong { display:block; font-weight:500; margin-bottom:2px; }
+.wt span   { color:rgba(255,255,255,0.38); line-height:1.4; }
+.wstart {
+  width:100%; padding:11px; background:#fff; border:none;
+  border-radius:8px; color:#000; font-size:12px; font-weight:600;
+  cursor:pointer; letter-spacing:0.5px; transition:opacity 0.14s;
+}
+.wstart:hover { opacity:0.85; }
+
+/* ─── SAVE DIALOG ──────────────────────────────────── */
+#savedlg {
+  position:fixed; inset:0; z-index:50;
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(0,0,0,0.72); backdrop-filter:blur(16px);
+  opacity:0; pointer-events:none; transition:opacity 0.18s;
+}
+#savedlg.open { opacity:1; pointer-events:all; }
+.scard {
+  width:340px; background:rgba(14,14,14,0.97);
+  border:1px solid rgba(255,255,255,0.1); border-radius:13px; padding:22px;
+}
+.scard h2 { font-size:13px; font-weight:500; margin-bottom:13px; }
+.sinp {
+  width:100%; padding:8px 11px; background:rgba(255,255,255,0.05);
+  border:1px solid rgba(255,255,255,0.1); border-radius:7px; color:#fff;
+  font-size:12px; outline:none; margin-bottom:9px; transition:border-color 0.14s;
+}
+.sinp:focus { border-color:rgba(255,255,255,0.3); }
+.sbtns { display:flex; gap:7px; margin-bottom:14px; }
+.sbtns button { flex:1; padding:8px; border-radius:6px; font-size:11px; font-weight:500; cursor:pointer; border:none; transition:opacity 0.13s; }
+.sbtns .ok  { background:#fff; color:#000; }
+.sbtns .ok:hover  { opacity:0.85; }
+.sbtns .cn  { background:rgba(255,255,255,0.07); color:rgba(255,255,255,0.55); }
+.sbtns .cn:hover  { background:rgba(255,255,255,0.11); color:#fff; }
+.sv-label { font-size:9px; color:rgba(255,255,255,0.28); letter-spacing:1.5px; text-transform:uppercase; margin-bottom:5px; }
+.sv-scroll { max-height:140px; overflow-y:auto; scrollbar-width:thin; scrollbar-color:rgba(255,255,255,0.12) transparent; }
+.sitem { display:flex; align-items:center; justify-content:space-between; padding:7px 9px; border-radius:6px; margin-bottom:3px; background:rgba(255,255,255,0.03); font-size:11px; color:rgba(255,255,255,0.45); cursor:pointer; border:1px solid rgba(255,255,255,0.05); transition:all 0.11s; }
+.sitem:hover { background:rgba(255,255,255,0.07); color:#fff; }
+.sitem-btns { display:flex; gap:7px; }
+.sitem-btns button { background:none; border:none; cursor:pointer; font-size:12px; padding:0 2px; }
+
+/* ─── CAM ERROR ────────────────────────────────────── */
+#camerr {
+  position:fixed; top:58px; left:50%; transform:translateX(-50%);
+  z-index:30; display:none; padding:13px 18px; max-width:420px;
+  background:rgba(239,68,68,0.14); border:1px solid rgba(239,68,68,0.3);
+  border-radius:9px; backdrop-filter:blur(14px); text-align:center;
+}
+#camerr p   { font-size:11px; color:rgba(255,255,255,0.65); line-height:1.6; margin-bottom:9px; }
+#camerr button { padding:5px 14px; background:rgba(239,68,68,0.18); border:1px solid rgba(239,68,68,0.4); border-radius:5px; color:#f87171; font-size:10px; cursor:pointer; }
+
+/* ─── HAND INFO OVERLAY (top-center, under topbar) ── */
+#hand-info {
+  position:fixed; top:58px; left:50%; transform:translateX(-50%);
+  z-index:10; display:flex; gap:8px; align-items:center;
+  background:rgba(0,0,0,0.5); backdrop-filter:blur(14px);
+  border:1px solid rgba(255,255,255,0.07); border-radius:8px;
+  padding:4px 14px; font-size:10px; color:rgba(255,255,255,0.35);
+  pointer-events:none;
+}
+#hand-info .hi-hand {
+  display:flex; align-items:center; gap:5px;
+}
+.hi-dot { width:5px; height:5px; border-radius:50%; }
+.hi-dot.blue { background:#60a5fa; box-shadow:0 0 4px #60a5fa; }
+.hi-dot.pink { background:#f472b6; box-shadow:0 0 4px #f472b6; }
+</style>
+</head>
+<body>
+
+<!-- WELCOME -->
+<div id="welcome">
+  <div class="wcard">
+    <div class="wtitle">AIR3D</div>
+    <div class="wsub">Dual-hand 3D model studio — no controller needed</div>
+    <div class="wgrid">
+      <div class="wi"><div class="we">🤌</div><div class="wt"><strong>Pinch + hold still</strong><span>In Create mode, pinch and stay still 0.5s → place object. Moving cancels it.</span></div></div>
+      <div class="wi"><div class="we">🤌🤌</div><div class="wt"><strong>Both hands pinch</strong><span>Spread = scale up, squeeze = shrink, twist = rotate Y.</span></div></div>
+      <div class="wi"><div class="we">✊</div><div class="wt"><strong>Fist / Open palm</strong><span>Orbit the camera. Both fists apart/together = zoom.</span></div></div>
+      <div class="wi"><div class="we">✏️</div><div class="wt"><strong>Draw mode</strong><span>Switch to Draw tab, then pinch + move to trace 3D lines. Release = commit.</span></div></div>
+      <div class="wi"><div class="we">☝️</div><div class="wt"><strong>Point finger</strong><span>Hover over any button for 1.5s to activate it hands-free.</span></div></div>
+      <div class="wi"><div class="we">👍</div><div class="wt"><strong>Thumbs up</strong><span>Cycle through perspective / top / front / side views.</span></div></div>
+    </div>
+    <button class="wstart" onclick="launch()">Open Studio →</button>
+  </div>
+</div>
+
+<!-- SAVE DIALOG -->
+<div id="savedlg">
+  <div class="scard">
+    <h2>Save model</h2>
+    <input class="sinp" id="mname" value="My Model" placeholder="Model name…">
+    <div class="sbtns">
+      <button class="ok" onclick="doSave()">Save</button>
+      <button class="cn" onclick="closeSave()">Cancel</button>
+    </div>
+    <div class="sv-label">Saved models</div>
+    <div class="sv-scroll" id="slist"></div>
+  </div>
+</div>
+
+<!-- CAM ERROR -->
+<div id="camerr">
+  <p id="camerrmsg">Camera error.</p>
+  <button onclick="retryCam()">Retry</button>
+</div>
+
+<!-- VIDEO + CANVASES -->
+<video id="video" autoplay playsinline muted></video>
+<canvas id="three"></canvas>
+<canvas id="hcanvas"></canvas>
+
+<!-- HAND CURSORS (one per hand) -->
+<div id="cursor-l" class="hand-cursor"><div class="ring"></div></div>
+<div id="cursor-r" class="hand-cursor"><div class="ring"></div></div>
+
+<!-- TOP BAR -->
+<div id="topbar">
+  <div class="logo">AIR3D</div>
+  <div class="bar-sep"></div>
+  <button class="tab active" id="tab-create" onclick="setMode('create')" data-action="mode-create">Create</button>
+  <button class="tab"        id="tab-edit"   onclick="setMode('edit')"   data-action="mode-edit">Edit</button>
+  <button class="tab"        id="tab-draw"   onclick="setMode('draw')"   data-action="mode-draw">Draw</button>
+  <div class="spacer"></div>
+  <button class="ibtn" id="cbtn"   onclick="toggleCam()"   title="Camera  C"        data-action="cam">📷</button>
+  <button class="ibtn"             onclick="openSave()"    title="Save  Ctrl+S"     data-action="save">💾</button>
+  <button class="ibtn"             onclick="exportJSON()"  title="Export"           data-action="export">↑</button>
+  <button class="ibtn"             onclick="doUndo()"      title="Undo  Ctrl+Z"     data-action="undo">↩</button>
+  <button class="ibtn"             onclick="clearAll()"    title="Clear scene"      data-action="clear">⌫</button>
+  <div class="bar-sep"></div>
+  <button class="ibtn"             onclick="showHelp()"    title="Help"             data-action="help">?</button>
+</div>
+
+<!-- LEFT SIDEBAR -->
+<div id="sidebar">
+
+  <!-- Shape picker (hidden in draw mode) -->
+  <div class="panel" id="panel-shapes">
+    <div class="plabel">Shape</div>
+    <div class="shapes">
+      <div class="shape on" id="sh-box"      onclick="pickShape('box')"      data-action="shape-box">
+        <svg viewBox="0 0 28 28" fill="none"><path d="M14 3L25 8.5V19.5L14 25L3 19.5V8.5Z" stroke="currentColor" stroke-width="1.3" fill="rgba(255,255,255,0.05)"/><path d="M14 3V25M3 8.5L14 14L25 8.5" stroke="currentColor" stroke-width="0.8" opacity="0.5"/></svg>
+        Box
+      </div>
+      <div class="shape" id="sh-sphere"   onclick="pickShape('sphere')"   data-action="shape-sphere">
+        <svg viewBox="0 0 28 28" fill="none"><circle cx="14" cy="14" r="10" stroke="currentColor" stroke-width="1.3" fill="rgba(255,255,255,0.05)"/><ellipse cx="14" cy="14" rx="10" ry="4" stroke="currentColor" stroke-width="0.8" opacity="0.5"/></svg>
+        Sphere
+      </div>
+      <div class="shape" id="sh-cylinder" onclick="pickShape('cylinder')" data-action="shape-cyl">
+        <svg viewBox="0 0 28 28" fill="none"><ellipse cx="14" cy="7" rx="9" ry="3.5" stroke="currentColor" stroke-width="1.3" fill="rgba(255,255,255,0.05)"/><ellipse cx="14" cy="21" rx="9" ry="3.5" stroke="currentColor" stroke-width="1.3" fill="rgba(255,255,255,0.05)"/><line x1="5" y1="7" x2="5" y2="21" stroke="currentColor" stroke-width="1.3"/><line x1="23" y1="7" x2="23" y2="21" stroke="currentColor" stroke-width="1.3"/></svg>
+        Cyl
+      </div>
+      <div class="shape" id="sh-cone"     onclick="pickShape('cone')"     data-action="shape-cone">
+        <svg viewBox="0 0 28 28" fill="none"><path d="M14 4L24 23H4Z" stroke="currentColor" stroke-width="1.3" fill="rgba(255,255,255,0.05)"/><ellipse cx="14" cy="23" rx="10" ry="3" stroke="currentColor" stroke-width="0.8" opacity="0.5"/></svg>
+        Cone
+      </div>
+      <div class="shape" id="sh-torus"    onclick="pickShape('torus')"    data-action="shape-torus">
+        <svg viewBox="0 0 28 28" fill="none"><ellipse cx="14" cy="16" rx="10" ry="6" stroke="currentColor" stroke-width="1.3" fill="rgba(255,255,255,0.05)"/><ellipse cx="14" cy="12" rx="10" ry="6" stroke="currentColor" stroke-width="1.3" fill="rgba(10,10,10,0.7)"/></svg>
+        Torus
+      </div>
+      <div class="shape" id="sh-tetra"    onclick="pickShape('tetra')"    data-action="shape-tetra">
+        <svg viewBox="0 0 28 28" fill="none"><path d="M14 3L25 22H3Z" stroke="currentColor" stroke-width="1.3" fill="rgba(255,255,255,0.05)"/><path d="M3 22L14 3L20 20" stroke="currentColor" stroke-width="0.8" opacity="0.5"/></svg>
+        Prism
+      </div>
+    </div>
+  </div>
+
+  <!-- Draw panel (shown only in draw mode) -->
+  <div class="panel" id="panel-draw" style="display:none">
+    <div class="plabel">Draw</div>
+
+    <div class="sl-row"><span>Draw height</span><span id="dh-val">0.0</span></div>
+    <input type="range" id="draw-height" min="0" max="5" step="0.1" value="0"
+      oninput="setDrawH(this.value)">
+    <div style="height:6px"></div>
+
+    <div style="font-size:10px;color:rgba(255,255,255,0.3);margin-bottom:8px;line-height:1.5">
+      Pinch + hold still 0.5s → draw stroke<br>
+      Release pinch → commit line
+    </div>
+
+    <button class="action" onclick="closeSelectedLine()" data-action="close-line">⬡ Close path</button>
+    <button class="action" onclick="extrudeSelectedLine()" data-action="extrude">↑ Extrude to 3D</button>
+    <button class="action del" onclick="delSel()" data-action="del-line">✕ Delete line</button>
+  </div>
+  <div class="panel">
+    <div class="plabel">Color</div>
+    <div class="colors" id="colrow">
+      <div class="color on" data-c="#60a5fa" style="background:#60a5fa" onclick="setSelColor('#60a5fa')" data-action="col-blue"></div>
+      <div class="color"    data-c="#34d399" style="background:#34d399" onclick="setSelColor('#34d399')" data-action="col-green"></div>
+      <div class="color"    data-c="#f472b6" style="background:#f472b6" onclick="setSelColor('#f472b6')" data-action="col-pink"></div>
+      <div class="color"    data-c="#fb923c" style="background:#fb923c" onclick="setSelColor('#fb923c')" data-action="col-orange"></div>
+      <div class="color"    data-c="#a78bfa" style="background:#a78bfa" onclick="setSelColor('#a78bfa')" data-action="col-purple"></div>
+      <div class="color"    data-c="#facc15" style="background:#facc15" onclick="setSelColor('#facc15')" data-action="col-yellow"></div>
+      <div class="color"    data-c="#f8fafc" style="background:#f8fafc" onclick="setSelColor('#f8fafc')" data-action="col-white"></div>
+      <div class="color"    data-c="#64748b" style="background:#64748b" onclick="setSelColor('#64748b')" data-action="col-slate"></div>
+    </div>
+  </div>
+
+  <!-- Size -->
+  <div class="panel">
+    <div class="plabel">Size</div>
+    <div class="sl-row"><span>Scale</span><span id="szval">1.0</span></div>
+    <input type="range" min="0.3" max="3.5" step="0.1" value="1" oninput="setSz(this.value)">
+  </div>
+
+  <!-- Transform mode -->
+  <div class="panel">
+    <div class="plabel">Transform mode</div>
+    <div class="tm-row">
+      <div class="tmbtn on" id="tm-M" onclick="setTM('move')"   data-action="tm-move"   title="Move  G">M</div>
+      <div class="tmbtn"    id="tm-R" onclick="setTM('rotate')" data-action="tm-rotate" title="Rotate R">R</div>
+      <div class="tmbtn"    id="tm-S" onclick="setTM('scale')"  data-action="tm-scale"  title="Scale  S">S</div>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="panel">
+    <div class="plabel">Actions</div>
+    <button class="action" onclick="placeCenter()" data-action="place">＋ Place object</button>
+    <button class="action" onclick="duplicate()"   data-action="dupe">⧉ Duplicate</button>
+    <button class="action" onclick="focusSel()"    data-action="focus">◎ Focus</button>
+    <button class="action del"  onclick="delSel()"     data-action="delete">✕ Delete</button>
+    <button class="action save" onclick="openSave()"   data-action="savemodel">↓ Save model</button>
+  </div>
+</div>
+
+<!-- RIGHT PANEL -->
+<div id="rpanel">
+  <div class="panel">
+    <div class="plabel">Scene <span id="ocnt" style="color:rgba(255,255,255,0.4)">0</span></div>
+    <div id="scl"><div style="font-size:10px;color:rgba(255,255,255,0.18);padding:3px 1px">Empty</div></div>
+  </div>
+  <div class="panel">
+    <div class="plabel">Transform</div>
+    <div class="tf-grid">
+      <div class="tf-cell"><div class="tf-label">X</div><div class="tf-val" id="tfx">—</div></div>
+      <div class="tf-cell"><div class="tf-label">Y</div><div class="tf-val" id="tfy">—</div></div>
+      <div class="tf-cell"><div class="tf-label">Z</div><div class="tf-val" id="tfz">—</div></div>
+      <div class="tf-cell"><div class="tf-label">RY</div><div class="tf-val" id="tfry">—</div></div>
+      <div class="tf-cell"><div class="tf-label">SX</div><div class="tf-val" id="tfsx">—</div></div>
+      <div class="tf-cell"><div class="tf-label">SY</div><div class="tf-val" id="tfsy">—</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- GESTURE GUIDE (collapsible) -->
+<div id="gest-guide">
+  <button class="gg-toggle" onclick="toggleGG()">
+    <span>Hand gestures</span><span id="gg-arrow">▲</span>
+  </button>
+  <div id="gg-body">
+    <div class="gg-row"><div class="gg-em">🤌</div><div class="gg-txt"><strong>Pinch + stay still 0.5s</strong>Place object in Create mode. Moving cancels it.</div></div>
+    <div class="gg-row"><div class="gg-em">🤌</div><div class="gg-txt"><strong>Pinch on object</strong>Grab and drag it immediately.</div></div>
+    <div class="gg-row"><div class="gg-em">🤌🤌</div><div class="gg-txt"><strong>Both pinch</strong>Spread = scale, twist = rotate Y, squeeze = shrink.</div></div>
+    <div class="gg-row"><div class="gg-em">✊✊</div><div class="gg-txt"><strong>Both fists</strong>Move apart/together to zoom viewport.</div></div>
+    <div class="gg-row"><div class="gg-em">✊</div><div class="gg-txt"><strong>One fist</strong>Orbit camera.</div></div>
+    <div class="gg-row"><div class="gg-em">✋</div><div class="gg-txt"><strong>Open palm</strong>Rotate viewport smoothly.</div></div>
+    <div class="gg-row"><div class="gg-em">✏️</div><div class="gg-txt"><strong>Draw mode</strong>Pinch + move = trace line. Release = commit stroke.</div></div>
+    <div class="gg-row"><div class="gg-em">☝️</div><div class="gg-txt"><strong>Point</strong>Hover button 1.5s to activate.</div></div>
+    <div class="gg-row"><div class="gg-em">✌️</div><div class="gg-txt"><strong>Peace (hold 1.2s)</strong>Delete selected object.</div></div>
+    <div class="gg-row"><div class="gg-em">👍</div><div class="gg-txt"><strong>Thumbs up</strong>Cycle views.</div></div>
+  </div>
+</div>
+
+<!-- BOTTOM STATUS BAR -->
+<div id="statusbar">
+  <div class="stat">obj <b id="sobjct">0</b></div>
+  <div class="stat">fps <b id="sfps">—</b></div>
+  <div class="stat">mode <b id="smode">CREATE</b></div>
+  <div class="stat" style="margin-left:4px">hands <b id="hand-count">—</b></div>
+
+  <!-- gesture pills -->
+  <div class="gp blue" id="gp-pinch-l"><div class="dot"></div>L Pinch</div>
+  <div class="gp pink" id="gp-pinch-r"><div class="dot"></div>R Pinch</div>
+  <div class="gp"      id="gp-both">   <div class="dot"></div>Both</div>
+  <div class="gp"      id="gp-fist">   <div class="dot"></div>Fist</div>
+  <div class="gp"      id="gp-open">   <div class="dot"></div>Orbit</div>
+  <div class="gp"      id="gp-point">  <div class="dot"></div>Point</div>
+  <div class="gp"      id="gp-peace">  <div class="dot"></div>Delete✌</div>
+  <div class="gp"      id="gp-thumb">  <div class="dot"></div>View👍</div>
+</div>
+
+<!-- TOASTS -->
+<div id="toasts"></div>
+
+<!-- THREE.JS -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+// ── APP STATE (shared between scene.js and gesture.js) ──
+const APP = {
+  mode:  'create',
+  shape: 'box',
+  color: '#60a5fa',
+  sz:    1.0,
+  tm:    'move',   // move | rotate | scale
+  drawY: 0,        // Y height for line drawing plane
+};
+
+// ── HELPERS ──
+function toast(msg, t='i') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + t; el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 2700);
+}
+
+function setMode(m) {
+  APP.mode = m;
+  ['create','edit','draw'].forEach(id => {
+    const el = document.getElementById('tab-' + id);
+    if (el) el.classList.toggle('active', id === m);
+  });
+  const s = document.getElementById('smode'); if (s) s.textContent = m.toUpperCase();
+  // Show/hide mode-specific panels
+  const ps = document.getElementById('panel-shapes');
+  const pd = document.getElementById('panel-draw');
+  if (ps) ps.style.display = m === 'draw' ? 'none' : '';
+  if (pd) pd.style.display = m === 'draw' ? ''     : 'none';
+}
+
+function setDrawH(v) {
+  const val = parseFloat(v);
+  const el = document.getElementById('dh-val'); if (el) el.textContent = val.toFixed(1);
+  APP.drawY = val;
+  if (typeof setDrawHeight === 'function') setDrawHeight(val);
+}
+
+function pickShape(s) {
+  APP.shape = s;
+  document.querySelectorAll('.shape').forEach(el =>
+    el.classList.toggle('on', el.id === 'sh-' + s));
+}
+
+function setSz(v) {
+  APP.sz = +v;
+  const el = document.getElementById('szval'); if (el) el.textContent = (+v).toFixed(1);
+}
+
+function setTM(m) {
+  APP.tm = m;
+  document.querySelectorAll('.tmbtn').forEach(el =>
+    el.classList.toggle('on', el.id === 'tm-' + m[0].toUpperCase()));
+}
+
+function showHelp() { document.getElementById('welcome').classList.remove('hide'); }
+
+let _ggOpen = false;
+function toggleGG() {
+  _ggOpen = !_ggOpen;
+  document.getElementById('gg-body').classList.toggle('open', _ggOpen);
+  document.getElementById('gg-arrow').textContent = _ggOpen ? '▼' : '▲';
+}
+
+// ── KEYBOARD SHORTCUTS ──
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  switch (e.key) {
+    case 'Delete': case 'Backspace': delSel(); break;
+    case 'f': case 'F': focusSel(); break;
+    case 'g': case 'G': setTM('move'); break;
+    case 'r': case 'R': if (!e.ctrlKey) setTM('rotate'); break;
+    case 's': case 'S': if (!e.ctrlKey) setTM('scale'); break;
+    case 'c': case 'C': toggleCam(); break;
+    case ' ': e.preventDefault(); placeCenter(); break;
+    case 'z': if (e.ctrlKey) { e.preventDefault(); doUndo(); } break;
+    case 'd': if (e.ctrlKey) { e.preventDefault(); duplicate(); } break;
+  }
+});
+
+// ── LAUNCH ──
+function launch() {
+  document.getElementById('welcome').classList.add('hide');
+  renderLoop();
+  setTimeout(() => startCam().catch(() => {}), 300);
+  // Two demo objects
+  setTimeout(() => {
+    const os=APP.shape, oc=APP.color, oz=APP.sz;
+    APP.shape='sphere'; APP.color='#60a5fa'; APP.sz=1;
+    spawnAt(new THREE.Vector3(-1.5, 0.6, 0));
+    APP.shape='box'; APP.color='#f472b6'; APP.sz=0.9;
+    spawnAt(new THREE.Vector3(1.5, 0.45, 0));
+    APP.shape=os; APP.color=oc; APP.sz=oz;
+    pickShape('box'); setSelColor('#60a5fa');
+  }, 500);
+}
+
+renderLoop(); // start render before welcome dismissed
+</script>
+
+<!-- Load scene and gesture logic -->
+<script src="scene.js"></script>
+<script src="gesture.js"></script>
+</body>
+</html>
